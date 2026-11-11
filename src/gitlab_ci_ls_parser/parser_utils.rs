@@ -27,6 +27,35 @@ impl ParserUtils {
             .map_or(0, |(i, _)| i)
     }
 
+    /// Finds `key` among the direct children of the mapping in `content`, whose first
+    /// line is the parent's own key. Returns the line offset and column of the key.
+    pub fn find_child_key(content: &str, key: &str) -> Option<(usize, usize)> {
+        let mut child_indent = None;
+
+        for (offset, line) in content.lines().enumerate().skip(1) {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let indent = line.len() - trimmed.len();
+            let child_indent = *child_indent.get_or_insert(indent);
+            if indent < child_indent {
+                return None;
+            }
+
+            if indent == child_indent
+                && trimmed
+                    .split_once(':')
+                    .is_some_and(|(k, _)| Self::strip_quotes(k.trim_end()) == key)
+            {
+                return Some((offset, indent));
+            }
+        }
+
+        None
+    }
+
     pub fn strip_quotes(value: &str) -> &str {
         value.trim_matches('\'').trim_matches('"')
     }
@@ -333,6 +362,17 @@ mod tests {
     use core::panic;
 
     use super::*;
+
+    #[test]
+    fn test_find_child_key() {
+        let content = ".rules_def:\n  # note\n  first:\n    - if: $A\n      when: never\n  'second':\n    - if: $B\n";
+
+        assert_eq!(Some((2, 2)), ParserUtils::find_child_key(content, "first"));
+        assert_eq!(Some((5, 2)), ParserUtils::find_child_key(content, "second"));
+        // nested deeper than the direct children
+        assert_eq!(None, ParserUtils::find_child_key(content, "when"));
+        assert_eq!(None, ParserUtils::find_child_key(content, "missing"));
+    }
 
     #[test]
     fn test_extract_component_from_uri() {

@@ -178,7 +178,7 @@ impl LSPHandlers {
 
                 None
             }
-            parser::PositionType::RuleReference(RuleReference { node }) => {
+            parser::PositionType::RuleReference(RuleReference { node, .. }) => {
                 for (document_uri, n) in nodes.iter() {
                     for (key, element) in n {
                         if key.eq(&node) {
@@ -524,12 +524,20 @@ impl LSPHandlers {
 
                 locations.append(&mut root);
             }
-            parser::PositionType::RuleReference(RuleReference { node }) => {
+            parser::PositionType::RuleReference(RuleReference { node, key }) => {
                 for (uri, content) in store {
                     if let Some(element) = self.parser.get_root_node(uri, content, &node) {
+                        let range = key
+                            .as_deref()
+                            .zip(element.content.as_deref())
+                            .and_then(|(key, cnt)| {
+                                Self::nested_key_range(&element.range, cnt, key)
+                            })
+                            .unwrap_or(element.range);
+
                         locations.push(LSPLocation {
                             uri: uri.clone(),
-                            range: element.range,
+                            range,
                         });
                     }
                 }
@@ -664,6 +672,24 @@ impl LSPHandlers {
             }
             _ => None,
         }
+    }
+
+    /// Range of `key` among the children of the root node described by `parent`/`content`.
+    fn nested_key_range(parent: &Range, content: &str, key: &str) -> Option<Range> {
+        let (offset, column) = parser_utils::ParserUtils::find_child_key(content, key)?;
+        let line = parent.start.line + u32::try_from(offset).ok()?;
+        let column = u32::try_from(column).ok()?;
+
+        Some(Range {
+            start: LSPPosition {
+                line,
+                character: column,
+            },
+            end: LSPPosition {
+                line,
+                character: column + u32::try_from(key.len()).ok()?,
+            },
+        })
     }
 
     pub fn on_definition_local(

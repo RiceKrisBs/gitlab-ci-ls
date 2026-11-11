@@ -69,6 +69,57 @@ impl TreesitterImpl {
         Self {}
     }
 
+    /// The `!reference [job, key]` entry under the cursor, wherever the tag appears.
+    fn reference_at(root: Node<'_>, content: &str, position: Position) -> Option<RuleReference> {
+        let point = tree_sitter::Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+
+        let mut element = root.descendant_for_point_range(point, point)?;
+        loop {
+            let parent = element.parent()?;
+            if parent.kind() == "flow_sequence" && element.kind() == "flow_node" {
+                let tagged = parent.parent().is_some_and(|node| {
+                    let mut walker = node.walk();
+                    let tagged = node.kind() == "flow_node"
+                        && node
+                            .children(&mut walker)
+                            .any(|c| c.kind() == "tag" && &content[c.byte_range()] == "!reference");
+                    tagged
+                });
+
+                return tagged.then(|| Self::rule_reference_at(element, content));
+            }
+
+            element = parent;
+        }
+    }
+
+    /// `element` is one entry of `!reference [job, key]`.
+    fn rule_reference_at(element: Node<'_>, content: &str) -> RuleReference {
+        let text = |n: Node<'_>| ParserUtils::strip_quotes(&content[n.byte_range()]).to_string();
+
+        let first = element.parent().and_then(|seq| {
+            let mut walker = seq.walk();
+            let first = seq
+                .named_children(&mut walker)
+                .find(|n| n.kind() == "flow_node");
+            first
+        });
+
+        match first {
+            Some(first) if first.id() != element.id() => RuleReference {
+                node: text(first),
+                key: Some(text(element)),
+            },
+            _ => RuleReference {
+                node: text(element),
+                key: None,
+            },
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn get_position_type_component(
         mat: &tree_sitter::QueryMatch<'_, '_>,
@@ -502,6 +553,12 @@ impl Treesitter for TreesitterImpl {
         let tree = parser.parse(content, None).unwrap();
         let root_node = tree.root_node();
 
+        // Checked before the query because enclosing matches, like a `before_script`
+        // sequence, would otherwise claim the cursor.
+        if let Some(reference) = Self::reference_at(root_node, content, position) {
+            return parser::PositionType::RuleReference(reference);
+        }
+
         let query = Query::new(
             &tree_sitter_yaml::LANGUAGE.into(),
             &TreesitterQueries::get_position_type(),
@@ -526,9 +583,6 @@ impl Treesitter for TreesitterImpl {
         let project_file_index = query.capture_index_for_name("file_value").unwrap();
         let project_item_index = query.capture_index_for_name("remote_include_item").unwrap();
         let basic_include_index = query.capture_index_for_name("basic_include_value").unwrap();
-        let rule_reference_index = query
-            .capture_index_for_name("rule_reference_value")
-            .unwrap();
         let component_uri_index = query.capture_index_for_name("component_uri").unwrap();
         let component_input_index = query.capture_index_for_name("component_input").unwrap();
         let component_input_error_index = query
@@ -659,14 +713,6 @@ impl Treesitter for TreesitterImpl {
                                         path: content[c.node.byte_range()].to_string(),
                                     }),
                                     ..Default::default()
-                                })
-                            }
-                            idx if idx == rule_reference_index => {
-                                return parser::PositionType::RuleReference(RuleReference {
-                                    node: content[c.node.byte_range()]
-                                        .trim_matches('\'')
-                                        .trim_matches('"')
-                                        .to_string(),
                                 })
                             }
                             _ => {
@@ -2315,7 +2361,7 @@ job_one:
 
         let want_node = ".rules:job";
         match pos_type {
-            parser::PositionType::RuleReference(RuleReference { node }) => {
+            parser::PositionType::RuleReference(RuleReference { node, .. }) => {
                 assert_eq!(want_node, node);
             }
             _ => panic!("invalid type"),
@@ -2352,10 +2398,85 @@ job_one:
 
         let want_node = ".rules:job";
         match pos_type {
-            parser::PositionType::RuleReference(RuleReference { node }) => {
+            parser::PositionType::RuleReference(RuleReference { node, .. }) => {
                 assert_eq!(want_node, node);
             }
             _ => panic!("invalid type"),
+        }
+    }
+
+    #[test]
+    fn test_get_position_type_rule_reference_nested_key() {
+        let cnt = r"
+.rules_def:
+  skip_if_docs_only:
+    - when: never
+job_one:
+  rules:
+    - !reference [.rules_def, skip_if_docs_only]
+";
+
+        let treesitter = TreesitterImpl::new();
+        let on_key = treesitter.get_position_type(
+            cnt,
+            Position {
+                line: 6,
+                character: 40,
+            },
+        );
+        let on_job = treesitter.get_position_type(
+            cnt,
+            Position {
+                line: 6,
+                character: 22,
+            },
+        );
+
+        match on_key {
+            parser::PositionType::RuleReference(RuleReference { node, key }) => {
+                assert_eq!(".rules_def", node);
+                assert_eq!(Some("skip_if_docs_only".to_string()), key);
+            }
+            _ => panic!("invalid type"),
+        }
+        match on_job {
+            parser::PositionType::RuleReference(RuleReference { node, key }) => {
+                assert_eq!(".rules_def", node);
+                assert_eq!(None, key);
+            }
+            _ => panic!("invalid type"),
+        }
+    }
+
+    #[test]
+    fn test_get_position_type_reference_outside_rules() {
+        let cnt = r"
+.tmpl:runner:
+  tags: [small]
+  setup:
+    - echo hi
+job_one:
+  tags: !reference [.tmpl:runner, tags]
+  before_script:
+    - !reference [.tmpl:runner, setup]
+  rules:
+    - if: !reference [.tmpl:runner, tags]
+";
+
+        let treesitter = TreesitterImpl::new();
+        // (line, character on the job name, character on the key)
+        for (line, on_job, on_key) in [(6, 22, 36), (8, 22, 36), (10, 22, 36)] {
+            for (character, want_key) in [(on_job, None), (on_key, Some(()))] {
+                let pos_type = treesitter.get_position_type(cnt, Position { line, character });
+
+                match pos_type {
+                    parser::PositionType::RuleReference(RuleReference { node, key }) => {
+                        assert_eq!(".tmpl:runner", node, "line {line}");
+                        assert_eq!(want_key.is_some(), key.is_some(), "line {line}");
+                    }
+                    other => panic!("invalid type on line {line}, character {character}: {other:?}"),
+                }
+            }
         }
     }
 

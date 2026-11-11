@@ -203,7 +203,10 @@ pub struct IncludeInformation {
 
 #[derive(Debug, Default)]
 pub struct RuleReference {
+    /// The job or hidden job being referenced.
     pub node: String,
+    /// Set when the cursor is on the key nested under `node`.
+    pub key: Option<String>,
 }
 
 #[derive(Debug)]
