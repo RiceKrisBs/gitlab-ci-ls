@@ -1,0 +1,38 @@
+name: Release macOS binary
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build aarch64-apple-darwin
+    runs-on: macos-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Build
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Package
+        run: tar -czf gitlab-ci-ls-aarch64-apple-darwin.tar.gz -C target/aarch64-apple-darwin/release gitlab-ci-ls
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: gitlab-ci-ls-aarch64-apple-darwin.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
