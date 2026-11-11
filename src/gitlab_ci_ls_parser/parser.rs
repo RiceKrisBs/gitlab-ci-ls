@@ -573,6 +573,8 @@ impl Parser for ParserImpl {
                             error!("error handling component; got err: {err}");
                         }
                     }
+                    // Templates live on the GitLab server and aren't fetched.
+                    IncludeItem::Template(_) => {}
                 }
             }
         }
@@ -1064,6 +1066,27 @@ mod tests {
 ";
 
         assert_eq!(full_definition.unwrap(), want);
+    }
+
+    #[test]
+    fn test_include_node_accepts_every_item_shape() {
+        let content = r#"
+include:
+  - project: group/project
+    file: template.yaml
+  - template: Jobs/SAST.gitlab-ci.yml
+  - component: gitlab.example.com/group/comp@1.0.0
+    inputs:
+      stage: build
+  - local: ci/rules.yml
+  - remote: https://example.com/ci.yml
+  - ci/plain.yml
+"#;
+
+        let node: IncludeNode = serde_yaml::from_str(content).unwrap();
+
+        assert_eq!(node.include.len(), 6);
+        assert!(matches!(node.include[1], IncludeItem::Template(_)));
     }
 
     #[test]

@@ -329,6 +329,7 @@ pub enum IncludeItem {
     Remote(Remote),
     Basic(String),
     Component(ComponentInclude),
+    Template(TemplateInclude),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -366,6 +367,12 @@ pub struct ComponentInclude {
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_inputs")]
     inputs: Option<HashMap<String, InputValue>>,
+}
+
+/// GitLab-provided template, e.g. `template: Jobs/SAST.gitlab-ci.yml`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TemplateInclude {
+    template: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
