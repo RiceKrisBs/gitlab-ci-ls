@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::anyhow;
-use log::{error, info};
+use log::{error, info, warn};
 use lsp_types::{Position, Url};
 
 use super::{
@@ -552,6 +552,19 @@ impl Parser for ParserImpl {
                         let reference = node
                             .reference
                             .map(|r| ParserUtils::expand_variables(&r, &self.variables));
+
+                        // A clone with an unexpanded variable in its URL or ref fails every
+                        // startup, so skip it until the variable is set.
+                        if let Some(variable) =
+                            ParserUtils::unresolved_variable(&project).or_else(|| {
+                                reference
+                                    .as_deref()
+                                    .and_then(ParserUtils::unresolved_variable)
+                            })
+                        {
+                            warn!("skipping include of project {project}; {variable} is not set");
+                            continue;
+                        }
 
                         let remote_files = match self.git.fetch_remote_repository(
                             project.as_str(),
