@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::env;
+use std::path::Path;
 
 use super::GitlabElement;
 use glob::glob;
 use log::{error, info};
 use temp_env::with_var;
+
+/// A CI variable reference: `${NAME}` (group 1) or `$NAME` (group 2).
+const VARIABLE_PATTERN: &str = r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)";
 
 pub struct ParserUtils {}
 
@@ -142,11 +146,29 @@ impl ParserUtils {
     }
 
     pub fn get_component_dest_dir(cache_path: &str, component_info: &ComponentInfo) -> String {
-        let components_path = format!("{cache_path}components/");
-        format!(
-            "{}{}/{}",
-            components_path, component_info.project, component_info.version
-        )
+        Path::new(cache_path)
+            .join("components")
+            .join(&component_info.project)
+            .join(&component_info.version)
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// The hostname from a git remote prefix such as `https://host/`, `git@host:`, or
+    /// `ssh://git@host:2222/`.
+    pub fn bare_host(remote: &str) -> &str {
+        let without_scheme = remote
+            .strip_prefix("https://")
+            .or_else(|| remote.strip_prefix("ssh://"))
+            .unwrap_or(remote);
+        let without_user = without_scheme
+            .split_once('@')
+            .map_or(without_scheme, |(_, rest)| rest);
+
+        without_user
+            .split([':', '/'])
+            .next()
+            .unwrap_or(without_user)
     }
 
     pub fn find_path_at_cursor(line: &str, cursor_pos: usize) -> (String, String) {
@@ -247,8 +269,17 @@ impl ParserUtils {
         // check if CI_SERVER_FQDN is being used. If so check if env variable is being set else set
         // to to git host
         if host.contains("$CI_SERVER_FQDN") {
-            let ci_server_fqdn =
-                env::var("CI_SERVER_FQDN").unwrap_or_else(|_| git_remote_uris[0].clone());
+            let ci_server_fqdn = match env::var("CI_SERVER_FQDN") {
+                Ok(fqdn) => fqdn,
+                Err(_) => git_remote_uris
+                    .first()
+                    .map(|remote| Self::bare_host(remote).to_string())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "$CI_SERVER_FQDN is unset and the workspace has no git remotes"
+                        )
+                    })?,
+            };
 
             host = host.replace("$CI_SERVER_FQDN", &ci_server_fqdn);
         }
@@ -337,9 +368,16 @@ impl ParserUtils {
 
     // Expands $VAR and ${VAR} using the given variables map, falling back to
     // process environment variables. Unknown variables are left untouched.
+    /// The first `$NAME` or `${NAME}` left in `input`, e.g. after [`Self::expand_variables`]
+    /// found no value for it.
+    pub fn unresolved_variable(input: &str) -> Option<&str> {
+        let re = regex::Regex::new(VARIABLE_PATTERN).expect("Invalid REGEX");
+
+        re.find(input).map(|m| m.as_str())
+    }
+
     pub fn expand_variables(input: &str, variables: &HashMap<String, String>) -> String {
-        let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-            .expect("Invalid REGEX");
+        let re = regex::Regex::new(VARIABLE_PATTERN).expect("Invalid REGEX");
 
         re.replace_all(input, |caps: &regex::Captures| {
             let name = caps
@@ -412,6 +450,55 @@ mod tests {
         };
 
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_extract_component_from_uri_ci_server_fqdn_from_remote_prefix() {
+        with_var("CI_SERVER_FQDN", None::<&str>, || {
+            let component_uri = "$CI_SERVER_FQDN/group/comp/job@1.0.0";
+
+            let https = ParserUtils::extract_component_from_uri(
+                component_uri,
+                &["https://git.example.com/".to_string()],
+            )
+            .unwrap();
+            let ssh = ParserUtils::extract_component_from_uri(
+                component_uri,
+                &["git@git.example.com:".to_string()],
+            )
+            .unwrap();
+
+            assert_eq!(https.host, "git.example.com");
+            assert_eq!(ssh.host, "git.example.com");
+            assert!(ParserUtils::extract_component_from_uri(component_uri, &[]).is_err());
+        });
+    }
+
+    #[test]
+    fn test_bare_host() {
+        for (remote, want) in [
+            ("https://gitlab.com/", "gitlab.com"),
+            ("git@git.example.com:", "git.example.com"),
+            ("ssh://git@git.example.com:4242/", "git.example.com"),
+            ("git.example.com", "git.example.com"),
+        ] {
+            assert_eq!(ParserUtils::bare_host(remote), want, "{remote}");
+        }
+    }
+
+    #[test]
+    fn test_get_component_dest_dir_without_trailing_slash() {
+        let info = ComponentInfo {
+            host: "git.example.com".to_string(),
+            project: "group/comp".to_string(),
+            component: "job".to_string(),
+            version: "1.0.0".to_string(),
+        };
+
+        assert_eq!(
+            ParserUtils::get_component_dest_dir("/cache/.gitlab-ci-ls", &info),
+            "/cache/.gitlab-ci-ls/components/group/comp/1.0.0"
+        );
     }
 
     #[test]
@@ -551,5 +638,22 @@ mod tests {
             ParserUtils::expand_variables("$THIS_IS_NOT_DEFINED_ANYWHERE/x", &HashMap::new()),
             "$THIS_IS_NOT_DEFINED_ANYWHERE/x"
         );
+    }
+
+    #[test]
+    fn test_unresolved_variable() {
+        assert_eq!(
+            ParserUtils::unresolved_variable("$BUILD_DOCKER_REF"),
+            Some("$BUILD_DOCKER_REF")
+        );
+        assert_eq!(
+            ParserUtils::unresolved_variable("group/${PROJECT}/x"),
+            Some("${PROJECT}")
+        );
+        assert_eq!(
+            ParserUtils::unresolved_variable("devops/ci-cd/build-docker"),
+            None
+        );
+        assert_eq!(ParserUtils::unresolved_variable("v1.2.3"), None);
     }
 }
