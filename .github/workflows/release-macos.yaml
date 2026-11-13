@@ -24,6 +24,14 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin
 
+      - name: Check tag matches Cargo.toml version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml version $version"
+            exit 1
+          fi
+
       - name: Build
         run: cargo build --release --locked --target aarch64-apple-darwin
 
