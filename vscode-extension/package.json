@@ -46,6 +46,21 @@
           "default": "~/.cache/gitlab-ci-ls/log/gitlab-ci-ls.log",
           "description": "Log path for the LS."
         },
+        "gitlabLs.documentPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.gitlab*"
+          ],
+          "description": "Glob patterns for YAML files the language server attaches to. Add patterns for CI files that don't start with `.gitlab`, such as child pipelines (e.g. `**/ci/**/*.{yml,yaml}`). Reload the window after changing."
+        },
+        "gitlabLs.dependenciesAutocompleteStageFiltering": {
+          "type": "boolean",
+          "default": false,
+          "description": "Only suggest jobs from the current or earlier stages when completing `dependencies`. Slower when stages aren't set on the job itself, because the server has to merge `extends` first."
+        },
         "gitlabLs.checkForUpdates": {
           "type": "boolean",
           "default": true,
