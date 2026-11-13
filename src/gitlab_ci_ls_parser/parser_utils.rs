@@ -660,15 +660,15 @@ mod tests {
     #[test]
     fn test_unresolved_variable() {
         assert_eq!(
-            ParserUtils::unresolved_variable("$BUILD_DOCKER_REF"),
-            Some("$BUILD_DOCKER_REF")
+            ParserUtils::unresolved_variable("$TEMPLATES_REF"),
+            Some("$TEMPLATES_REF")
         );
         assert_eq!(
             ParserUtils::unresolved_variable("group/${PROJECT}/x"),
             Some("${PROJECT}")
         );
         assert_eq!(
-            ParserUtils::unresolved_variable("devops/ci-cd/build-docker"),
+            ParserUtils::unresolved_variable("group/ci-templates"),
             None
         );
         assert_eq!(ParserUtils::unresolved_variable("v1.2.3"), None);
