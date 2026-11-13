@@ -38,7 +38,12 @@ export function activate(context: ExtensionContext) {
     initializationOptions: {
       cache: config.get("cachePath"),
       log_path: config.get("logPath"),
-      package_map: config.get("packageMap")
+      package_map: config.get("packageMap"),
+      options: {
+        dependencies_autocomplete_stage_filtering: config.get(
+          "dependenciesAutocompleteStageFiltering",
+        ),
+      },
     },
   };
 
