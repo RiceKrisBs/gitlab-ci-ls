@@ -35,6 +35,20 @@ impl Messages {
     fn handle_message(&self, msg: &Message) {
         info!("received message {msg:?}");
 
+        if let Some(uri) = text_document_uri(msg) {
+            if !self.events.is_pipeline_file(&uri) {
+                info!("ignoring message for {uri}: not part of the pipeline");
+
+                if let Some(response) = null_response(msg) {
+                    if let Err(err) = self.connection.sender.send(response) {
+                        error!("error handling message: {err}");
+                    }
+                }
+
+                return;
+            }
+        }
+
         let msg_clone = msg.clone();
         let result = match msg_clone {
             // TODO: implement workspace/didChangeConfiguration
@@ -140,6 +154,22 @@ fn rename(res: RenameResult) -> Message {
     }
 
     Message::Response(res)
+}
+
+/// The document a `textDocument/*` request or notification is about. Every such message
+/// carries it as `params.textDocument.uri`.
+fn text_document_uri(msg: &Message) -> Option<lsp_types::Url> {
+    let (method, params) = match msg {
+        Message::Request(req) => (&req.method, &req.params),
+        Message::Notification(notification) => (&notification.method, &notification.params),
+        Message::Response(_) => return None,
+    };
+
+    if !method.starts_with("textDocument/") {
+        return None;
+    }
+
+    serde_json::from_value(params.get("textDocument")?.get("uri")?.clone()).ok()
 }
 
 fn null_response(msg: &Message) -> Option<Message> {

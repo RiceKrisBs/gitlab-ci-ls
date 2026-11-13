@@ -319,6 +319,14 @@ impl ParserUtils {
         Some(after.to_string())
     }
 
+    /// Whether the file name marks `uri` as GitLab CI config: `.gitlab-ci.yml` itself, or a
+    /// standalone file following GitLab's `<name>.gitlab-ci.yml` convention.
+    pub fn has_gitlab_ci_name(uri: &str) -> bool {
+        let name = uri.rsplit('/').next().unwrap_or(uri);
+
+        name.ends_with(".gitlab-ci.yml") || name.ends_with(".gitlab-ci.yaml")
+    }
+
     pub(crate) fn is_glob(uri: &str) -> bool {
         // TODO: kinda should work?
         uri.contains('*')
@@ -704,6 +712,21 @@ mod tests {
             ParserUtils::expand_include_ref(Some("main"), &HashMap::new()),
             Some("main".to_string())
         );
+    }
+
+    #[test]
+    fn test_has_gitlab_ci_name() {
+        assert!(ParserUtils::has_gitlab_ci_name("file:///repo/.gitlab-ci.yml"));
+        assert!(ParserUtils::has_gitlab_ci_name("file:///repo/.gitlab-ci.yaml"));
+        assert!(ParserUtils::has_gitlab_ci_name(
+            "file:///repo/templates/build.gitlab-ci.yml"
+        ));
+
+        assert!(!ParserUtils::has_gitlab_ci_name("file:///repo/.gitlab-ci-ls.yml"));
+        assert!(!ParserUtils::has_gitlab_ci_name("file:///repo/ci/child.yaml"));
+        assert!(!ParserUtils::has_gitlab_ci_name(
+            "file:///repo/.gitlab-ci.yml/values.yaml"
+        ));
     }
 
     #[test]
