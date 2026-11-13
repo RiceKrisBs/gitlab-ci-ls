@@ -549,21 +549,25 @@ impl Parser for ParserImpl {
                     }
                     IncludeItem::Project(node) => {
                         let project = ParserUtils::expand_variables(&node.project, &self.variables);
-                        let reference = node
-                            .reference
-                            .map(|r| ParserUtils::expand_variables(&r, &self.variables));
 
-                        // A clone with an unexpanded variable in its URL or ref fails every
-                        // startup, so skip it until the variable is set.
-                        if let Some(variable) =
-                            ParserUtils::unresolved_variable(&project).or_else(|| {
-                                reference
-                                    .as_deref()
-                                    .and_then(ParserUtils::unresolved_variable)
-                            })
-                        {
+                        // A clone with an unexpanded variable in its URL fails every startup,
+                        // so skip it until the variable is set.
+                        if let Some(variable) = ParserUtils::unresolved_variable(&project) {
                             warn!("skipping include of project {project}; {variable} is not set");
                             continue;
+                        }
+
+                        let reference = ParserUtils::expand_include_ref(
+                            node.reference.as_deref(),
+                            &self.variables,
+                        );
+
+                        if reference.is_none() {
+                            if let Some(raw) = node.reference.as_deref() {
+                                warn!(
+                                    "include of project {project}: ref {raw} has an unset variable; using the default branch"
+                                );
+                            }
                         }
 
                         let remote_files = match self.git.fetch_remote_repository(

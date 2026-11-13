@@ -393,6 +393,23 @@ impl ParserUtils {
         })
         .to_string()
     }
+
+    /// Expands an include's `ref:`. Returns `None`, meaning the project's default branch, when
+    /// there is no `ref:` or when a variable in it has no value (e.g. a group-level CI variable
+    /// that only exists on the GitLab server). Indexing, go-to-definition and completion all use
+    /// this so they agree on which cached checkout an include points at.
+    pub fn expand_include_ref(
+        reference: Option<&str>,
+        variables: &HashMap<String, String>,
+    ) -> Option<String> {
+        let expanded = Self::expand_variables(reference?, variables);
+
+        if Self::unresolved_variable(&expanded).is_some() {
+            return None;
+        }
+
+        Some(expanded)
+    }
 }
 
 #[cfg(test)]
@@ -655,5 +672,42 @@ mod tests {
             None
         );
         assert_eq!(ParserUtils::unresolved_variable("v1.2.3"), None);
+    }
+
+    #[test]
+    fn test_expand_include_ref_unresolved_falls_back_to_default_branch() {
+        assert_eq!(
+            ParserUtils::expand_include_ref(
+                Some("$THIS_IS_NOT_DEFINED_ANYWHERE"),
+                &HashMap::new()
+            ),
+            None
+        );
+        assert_eq!(
+            ParserUtils::expand_include_ref(
+                Some("release-${THIS_IS_NOT_DEFINED_ANYWHERE}"),
+                &HashMap::new()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_expand_include_ref_resolved() {
+        let variables = HashMap::from([("TEMPLATES_REF".to_string(), "v2.0.0".to_string())]);
+
+        assert_eq!(
+            ParserUtils::expand_include_ref(Some("$TEMPLATES_REF"), &variables),
+            Some("v2.0.0".to_string())
+        );
+        assert_eq!(
+            ParserUtils::expand_include_ref(Some("main"), &HashMap::new()),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_expand_include_ref_missing() {
+        assert_eq!(ParserUtils::expand_include_ref(None, &HashMap::new()), None);
     }
 }

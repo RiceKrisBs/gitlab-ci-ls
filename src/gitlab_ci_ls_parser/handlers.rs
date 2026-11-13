@@ -586,16 +586,12 @@ impl LSPHandlers {
                     &self.cfg.variables,
                 );
 
-                let path = if let Some(reference) = remote.reference {
-                    let reference = parser_utils::ParserUtils::expand_variables(
-                        &reference,
-                        &self.cfg.variables,
-                    );
-
-                    format!("{project}/{reference}/{file}")
-                } else {
-                    format!("{project}/{DEFAULT_BRANCH_SUBFOLDER}/{file}")
-                };
+                let reference = parser_utils::ParserUtils::expand_include_ref(
+                    remote.reference.as_deref(),
+                    &self.cfg.variables,
+                );
+                let reference = reference.as_deref().unwrap_or(DEFAULT_BRANCH_SUBFOLDER);
+                let path = format!("{project}/{reference}/{file}");
 
                 store
                     .keys()
@@ -2219,13 +2215,10 @@ impl LSPHandlers {
             });
 
         let project = ParserUtils::expand_variables(project, &self.cfg.variables);
-        let path = if let Some(reference) = &remote.reference {
-            let reference = ParserUtils::expand_variables(reference, &self.cfg.variables);
-
-            format!("{project}/{reference}/")
-        } else {
-            format!("{project}/{DEFAULT_BRANCH_SUBFOLDER}/")
-        };
+        let reference =
+            ParserUtils::expand_include_ref(remote.reference.as_deref(), &self.cfg.variables);
+        let reference = reference.as_deref().unwrap_or(DEFAULT_BRANCH_SUBFOLDER);
+        let path = format!("{project}/{reference}/");
 
         let (current, previous) =
             ParserUtils::find_path_at_cursor(line, usize::try_from(position.character).unwrap());
