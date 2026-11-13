@@ -339,6 +339,15 @@ impl LSPHandlers {
         None
     }
 
+    /// Whether the server should handle `uri`. True for files indexed from the root files and
+    /// their includes, cached remote and component files, and files whose name marks them as
+    /// GitLab CI config. Anything else (Kubernetes manifests, Compose files, other YAML) is
+    /// ignored so its keys don't end up in the job index.
+    pub fn is_pipeline_file(&self, uri: &Url) -> bool {
+        ParserUtils::has_gitlab_ci_name(uri.as_str())
+            || self.store.lock().unwrap().contains_key(uri.as_str())
+    }
+
     pub fn on_open(&self, notification: Notification) -> Option<LSPResult> {
         let in_progress = self.indexing_in_progress.lock().unwrap();
         drop(in_progress);
@@ -346,25 +355,30 @@ impl LSPHandlers {
         let params =
             serde_json::from_value::<DidOpenTextDocumentParams>(notification.params).ok()?;
 
+        self.index_document(&params.text_document.uri, &params.text_document.text);
+
+        self.generate_diagnostics(params.text_document.uri)
+    }
+
+    /// Parses `text` as the content of `uri`, following its includes, and adds the results to
+    /// the index. Files newly reached through an include become pipeline files.
+    fn index_document(&self, uri: &Url, text: &str) {
         let mut store = self.store.lock().unwrap();
         let mut all_nodes = self.nodes.lock().unwrap();
         let mut all_stages = self.stages.lock().unwrap();
 
-        let root_u = format!("file://{}", &self.cfg.root_dir);
+        // Local includes are joined onto this URL. Without the trailing slash, `join` replaces
+        // the root directory's last segment instead of descending into it.
+        let root_u = format!("file://{}/", self.cfg.root_dir.trim_end_matches('/'));
         let u = match Url::parse(&root_u) {
             Ok(res) => res,
             Err(err) => {
                 warn!("err: {err}");
-                return None;
+                return;
             }
         };
 
-        if let Some(results) = self.parser.parse_contents(
-            &params.text_document.uri,
-            &params.text_document.text,
-            &u,
-            true,
-        ) {
+        if let Some(results) = self.parser.parse_contents(uri, text, &u, true) {
             for file in results.files {
                 store.insert(file.path, file.content);
             }
@@ -385,14 +399,6 @@ impl LSPHandlers {
         }
 
         info!("finished searching");
-
-        // releasing lock because generate diagnostics grabs it
-        // and is used in two places
-        drop(store);
-        drop(all_nodes);
-        drop(all_stages);
-
-        self.generate_diagnostics(params.text_document.uri)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1580,6 +1586,19 @@ impl LSPHandlers {
         let params =
             serde_json::from_value::<DidSaveTextDocumentParams>(notification.params).ok()?;
 
+        // Edits are parsed without following includes, so re-index on save to pick up
+        // includes added since the file was opened.
+        let content = self
+            .store
+            .lock()
+            .unwrap()
+            .get(params.text_document.uri.as_str())
+            .cloned();
+
+        if let Some(content) = content {
+            self.index_document(&params.text_document.uri, &content);
+        }
+
         self.generate_diagnostics(params.text_document.uri)
     }
 
@@ -2343,7 +2362,10 @@ fn generate_component_diagnostics_from_spec(
 #[cfg(test)]
 mod tests {
     use super::LSPHandlers;
+    use crate::gitlab_ci_ls_parser::{fs_utils::FSUtilsImpl, LSPConfig, LSPExperimental};
+    use lsp_server::Notification;
     use lsp_types::Url;
+    use std::collections::HashMap;
     use std::fs::{self, File};
     use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
@@ -2366,6 +2388,86 @@ mod tests {
         }
 
         dir
+    }
+
+    // Indexes `repo` the way the server does at startup.
+    fn index_repo(repo: &TempDir, cache: &TempDir) -> LSPHandlers {
+        // Indexing reads `<cache>/base` before the root files.
+        fs::create_dir_all(cache.path().join("base")).unwrap();
+
+        LSPHandlers::new(
+            LSPConfig {
+                root_dir: repo.path().to_string_lossy().to_string(),
+                cache_path: format!("{}/", cache.path().to_string_lossy()),
+                package_map: HashMap::new(),
+                remote_urls: vec![],
+                variables: HashMap::new(),
+                experimental: LSPExperimental {
+                    dependencies_autocomplete_stage_filtering: false,
+                },
+            },
+            Box::new(FSUtilsImpl::new(cache.path().to_string_lossy().to_string())),
+        )
+    }
+
+    fn file_url(repo: &TempDir, path: &str) -> Url {
+        Url::parse(&format!("file://{}/{path}", repo.path().to_string_lossy())).unwrap()
+    }
+
+    #[test]
+    fn test_is_pipeline_file() {
+        let repo = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("ci")).unwrap();
+        fs::create_dir_all(repo.path().join("deploy")).unwrap();
+        fs::write(
+            repo.path().join(".gitlab-ci.yml"),
+            "include:\n  - local: ci/child.yaml\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join("ci/child.yaml"), "build:\n  script: make\n").unwrap();
+        fs::write(repo.path().join("deploy/k8s.yaml"), "apiVersion: v1\n").unwrap();
+
+        let handlers = index_repo(&repo, &cache);
+
+        assert!(handlers.is_pipeline_file(&file_url(&repo, ".gitlab-ci.yml")));
+        assert!(handlers.is_pipeline_file(&file_url(&repo, "ci/child.yaml")));
+        assert!(handlers.is_pipeline_file(&file_url(&repo, "templates/build.gitlab-ci.yml")));
+        assert!(!handlers.is_pipeline_file(&file_url(&repo, "deploy/k8s.yaml")));
+        assert!(!handlers.is_pipeline_file(&file_url(&repo, ".gitlab-ci-ls.yml")));
+    }
+
+    #[test]
+    fn test_save_picks_up_new_include() {
+        let repo = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("ci")).unwrap();
+        fs::write(repo.path().join(".gitlab-ci.yml"), "build:\n  script: make\n").unwrap();
+        fs::write(repo.path().join("ci/new.yaml"), "test:\n  script: make test\n").unwrap();
+
+        let handlers = index_repo(&repo, &cache);
+        let root = file_url(&repo, ".gitlab-ci.yml");
+        let new = file_url(&repo, "ci/new.yaml");
+        assert!(!handlers.is_pipeline_file(&new));
+
+        let edited = "include:\n  - local: ci/new.yaml\nbuild:\n  script: make\n";
+        handlers.on_change(Notification::new(
+            "textDocument/didChange".to_string(),
+            serde_json::json!({
+                "textDocument": { "uri": root.as_str(), "version": 2 },
+                "contentChanges": [{ "text": edited }],
+            }),
+        ));
+        assert!(
+            !handlers.is_pipeline_file(&new),
+            "edits don't follow includes"
+        );
+
+        handlers.on_save(Notification::new(
+            "textDocument/didSave".to_string(),
+            serde_json::json!({ "textDocument": { "uri": root.as_str() } }),
+        ));
+        assert!(handlers.is_pipeline_file(&new));
     }
 
     #[test]
