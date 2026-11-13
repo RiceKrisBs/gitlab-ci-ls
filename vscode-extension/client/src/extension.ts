@@ -32,10 +32,9 @@ export function activate(context: ExtensionContext) {
 
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
-    // Register the server for plain text documents
-    documentSelector: [
-      { scheme: "file", language: "yaml", pattern: "**/.gitlab*" },
-    ],
+    documentSelector: config
+      .get<string[]>("documentPatterns", ["**/.gitlab*"])
+      .map((pattern) => ({ scheme: "file", language: "yaml", pattern })),
     initializationOptions: {
       cache: config.get("cachePath"),
       log_path: config.get("logPath"),
